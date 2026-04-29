@@ -22,9 +22,15 @@ if (!fs.existsSync('./uploads')) {
 // Middlewares
 app.use(cors());
 
-app.use(cors({
-  origin: 'https://reservas.tonav-tech.online' // La URL de tu frontend
-}));
+// Configuración de CORS
+const corsOptions = {
+  origin: 'https://reservas.tonav-tech.online', // Tu URL de Vercel
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Bypass-Tunnel-Reminder'], // ¡Importante incluir Bypass!
+  credentials: true
+};
+
+app.use(cors(corsOptions));
 app.use(bodyParser.json());
 
 // Servir archivos estáticos (para que puedas ver los PDFs/Excel desde el navegador)

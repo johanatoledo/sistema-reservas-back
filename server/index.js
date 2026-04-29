@@ -4,7 +4,7 @@ import bodyParser from 'body-parser';
 import dotenv from 'dotenv';
 
 // Importación de Rutas
-import chatRoutes from './src/routes/chatRoutes.js';
+impcaort chatRoutes from './src/routes/chatRoutes.js';
 import adminRoutes from './src/routes/adminRoutes.js';
 import uploadRoutes from './src/routes/uploadRoutes.js';
 
@@ -134,7 +134,7 @@ app.use((err, req, res, next) => {
 // ==========================================
 // INICIAR SERVIDOR
 // ==========================================
-app.listen(PORT, () => {
+app.listen(PORT,"0.0.0.0",() => {
   console.log(`✓ Server running on port ${PORT}`);
   console.log(`✓ Allowed origins:`, allowedOrigins);
   console.log(`✓ Environment: ${process.env.NODE_ENV || 'development'}`);

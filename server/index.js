@@ -21,6 +21,10 @@ if (!fs.existsSync('./uploads')) {
 
 // Middlewares
 app.use(cors());
+
+app.use(cors({
+  origin: 'https://reservas.tonav-tech.online' // La URL de tu frontend
+}));
 app.use(bodyParser.json());
 
 // Servir archivos estáticos (para que puedas ver los PDFs/Excel desde el navegador)

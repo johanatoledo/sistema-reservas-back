@@ -19,13 +19,11 @@ const PORT = process.env.PORT || 4000;
 
 
 const allowedOrigins = [
-  (process.env.ALLOWED_ORIGINS || '').split(',').filter(Boolean),
-  // Para desarrollo local (si es necesario)
-  ...(process.env.NODE_ENV === 'development' ? [
-    'http://localhost:4000',
-    'http://127.0.0.1:4000'
-  ] : [])
-];
+  'https://reservas.tonav-tech.online',
+  'https://localhost:4000'
+   'https://localhost:5173'
+];,
+
 
 // ==========================================
 // CONFIGURACIÓN DE CORS - OPCIÓN RECOMENDADA

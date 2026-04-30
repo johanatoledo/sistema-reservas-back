@@ -10,6 +10,7 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 4000;
 
+/*
 // ==========================================
 // CONFIGURACIÓN DE ORIGINS PERMITIDOS
 // ==========================================
@@ -81,7 +82,7 @@ if (process.env.NODE_ENV === 'development') {
     next();
   });
 }
-
+*/
 // ==========================================
 // DEFINICIÓN DE ENDPOINTS
 // ==========================================
@@ -93,6 +94,7 @@ app.get('/', (req, res) => {
   res.send('Limenita backend running');
 });
 
+/*
 // ==========================================
 // MANEJO DE ERRORES
 // ==========================================
@@ -108,12 +110,11 @@ app.use((err, req, res, next) => {
   console.error('Error:', err);
   res.status(500).json({ error: 'Error interno del servidor' });
 });
-
+*/
 // ==========================================
 // INICIAR SERVIDOR
 // ==========================================
 app.listen(PORT,"0.0.0.0",() => {
   console.log(`✓ Server running on port ${PORT}`);
-  console.log(`✓ Allowed origins:`, allowedOrigins);
-  console.log(`✓ Environment: ${process.env.NODE_ENV || 'development'}`);
+
 });

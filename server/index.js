@@ -2,11 +2,8 @@ import express from 'express';
 import cors from 'cors';
 import bodyParser from 'body-parser';
 import dotenv from 'dotenv';
-
-// Importación de Rutas
-impcaort chatRoutes from './src/routes/chatRoutes.js';
+import chatRoutes from './src/routes/chatRoutes.js';
 import adminRoutes from './src/routes/adminRoutes.js';
-import uploadRoutes from './src/routes/uploadRoutes.js';
 
 dotenv.config();
 
@@ -17,7 +14,6 @@ const PORT = process.env.PORT || 4000;
 // CONFIGURACIÓN DE ORIGINS PERMITIDOS
 // ==========================================
 
-
 const allowedOrigins = [
   'https://reservas.tonav-tech.online',
   'https://localhost:4000'
@@ -26,11 +22,11 @@ const allowedOrigins = [
 
 
 // ==========================================
-// CONFIGURACIÓN DE CORS - OPCIÓN RECOMENDADA
+// CONFIGURACIÓN DE CORS 
 // ==========================================
 const corsOptions = {
   origin: function(origin, callback) {
-    // Permitir peticiones sin origen (Postman, curl, requests internos)
+    
     if (!origin) {
       return callback(null, true);
     }
@@ -39,7 +35,7 @@ const corsOptions = {
       return callback(null, true);
     }
     
-    // Log para debugging en desarrollo
+  
     if (process.env.NODE_ENV === 'development') {
       console.warn(`CORS bloqueado para origen: ${origin}`);
     }
@@ -59,7 +55,7 @@ const corsOptions = {
     'Bypass-Tunnel-Reminder'
   ],
   exposedHeaders: ['Content-Length', 'X-JSON-Response'],
-  maxAge: 86400 // 24 horas - cachea las respuestas preflight
+  maxAge: 86400 
 };
 
 // Aplicar CORS globalmente
@@ -70,22 +66,6 @@ app.use(cors(corsOptions));
 // ==========================================
 app.options('*', cors(corsOptions));
 
-// Alternativa manual si quieres mayor control:
-/*
-app.options('*', (req, res) => {
-  const origin = req.headers.origin;
-  
-  if (!origin || allowedOrigins.includes(origin)) {
-    res.header('Access-Control-Allow-Origin', origin || '*');
-    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept');
-    res.header('Access-Control-Allow-Credentials', 'true');
-    res.header('Access-Control-Max-Age', '86400');
-  }
-  
-  return res.sendStatus(200);
-});
-*/
 
 // ==========================================
 // MIDDLEWARES

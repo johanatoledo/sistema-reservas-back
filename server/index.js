@@ -16,7 +16,7 @@ const PORT = process.env.PORT || 4000;
 
 const allowedOrigins = [
   'https://reservas.tonav-tech.online',
-  'https://localhost:4000'
+  'https://localhost:4000',
    'https://localhost:5173'
 ];,
 

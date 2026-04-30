@@ -18,7 +18,7 @@ const allowedOrigins = [
   'https://reservas.tonav-tech.online',
   'https://localhost:4000',
    'https://localhost:5173'
-];,
+];
 
 
 // ==========================================
@@ -87,7 +87,7 @@ if (process.env.NODE_ENV === 'development') {
 // ==========================================
 app.use('/api/chat', chatRoutes);
 app.use('/api/admin', adminRoutes);
-app.use('/api/upload', uploadRoutes);
+
 
 app.get('/', (req, res) => {
   res.send('Limenita backend running');

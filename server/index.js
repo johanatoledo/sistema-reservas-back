@@ -8,7 +8,7 @@ import adminRoutes from './src/routes/adminRoutes.js';
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 4000;
+const PORT = process.env.PORT || 4001;
 
 
 // ==========================================
@@ -17,8 +17,8 @@ const PORT = process.env.PORT || 4000;
 
 const allowedOrigins = [
   'https://reservas.tonav-tech.online',
-  'https://localhost:4000',
-   'https://localhost:5173'
+  'http://localhost:4001',
+   'http://localhost:5173'
 ];
 
 

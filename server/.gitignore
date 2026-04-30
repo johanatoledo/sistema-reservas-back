@@ -8,7 +8,7 @@ pnpm-debug.log*
 lerna-debug.log*
 
 .env
-
+.cloudflared-linux-amd64.deb
 node_modules
 dist
 dist-ssr

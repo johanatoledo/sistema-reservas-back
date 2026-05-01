@@ -49,8 +49,9 @@ A3. Si EXTRANJERO:
 B1. Pedir: RUC (validar y confirmar nombre empresa).Esperar a que responda y
 B2. Pedir: Número de asistentes.Esperar a que responda y
 B3. Pedir: Fecha y hora de reunión.Esperar a que responda y
-B4. Pedir: Email (para enviar cotización).Esperar a que responda y
-B5. Pedir: Motivo de reunión.Esperar a que responda y
+B4. Pedir: Numero de telefono.Esperar a que responda y
+B5. Pedir: Email (para enviar cotización).Esperar a que responda y
+B6. Pedir: Motivo de reunión.
 
 
 🎁 REGALO POR CUMPLEAÑOS:

@@ -1,376 +1,433 @@
-// server/src/controllers/chatControllers.js - VERSIÓN CORREGIDA
-import OpenAI from 'openai';
-import { SYSTEM_PROMPT } from '../config/prompts.js';
-import { consultarRuc, consultarDni } from '../services/apisPeru.js';
-import { GuardarReserva } from '../controllers/adminControllers.js';
-import dotenv from 'dotenv';
+
+import OpenAI from "openai";
+import { SYSTEM_PROMPT } from "../config/prompts.js";
+import { GuardarReserva } from "./adminControllers.js";
+import dotenv from "dotenv";
+
 dotenv.config();
 
-const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5173";
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// 🛠️ GRUPO A: Siempre activas (Guardar y Transacción)
+// Herramientas disponibles para el agente
 const toolsComunes = [
   {
     type: "function",
     function: {
-        name: "confirmar_y_guardar_reserva",
-        description: "Registra la reserva en la base de datos dependiendo si es personal, corporativa o extranjero despues de recolectar todos los datos.",
-        parameters: {
-            type: "object",
-            properties: {
-                tipo_cliente: { type: "string", enum: ["personal", "corporativa", "extranjero"] },
-                identificador_fiscal: { type: "string", description: "DNI, RUC o EXTRANJERO" },
-                nombre_cliente: { type: "string" },
-                telefono: { type: "string" },
-                correo: { type: "string" },
-                numero_personas: { type: "integer" },
-                fecha: { type: "string", description: "Formato YYYY-MM-DD" },
-                hora: { type: "string", description: "Formato HH:MM" },
-                motivo: { type: "string" },
-                metodo_pago: { type: "string", enum: ["Yape", "Tarjeta", "Transferencia"], description: "Solo si el cliente desea hacer un adelanto, de lo contrario puede quedar vacío o nulo.Pero si el cliente realiza el pago asegurate q indique por que medio lo hizo" },
-                monto: {  type: "number", description: "Monto del adelanto o pago realizado. Es obligatorio si existe un id_pago_transaccion, sin importar si el cliente es personal, corporativo o extranjero." },
-                id_pago_transaccion: { type: "string", description: "ID de la transacción de pago, solo si el cliente desea hacer un adelanto y solo valido para reservas personales" }, 
-            },
-            required: ["tipo_cliente", "identificador_fiscal", "nombre_cliente", "telefono", "numero_personas", "fecha", "hora"]
-        }
-    }
-},
+      name: "confirmar_y_guardar_reserva",
+      description:
+        "Registra una reserva personal, corporativa o de un visitante extranjero después de recopilar los datos y recibir la confirmación explícita del comensal.",
+      parameters: {
+        type: "object",
+        properties: {
+          tipo_cliente: {
+            type: "string",
+            enum: ["personal", "corporativa", "extranjero"],
+          },
+          identificador_fiscal: {
+            type: ["string", "null"],
+            description:
+              "Dato opcional. No solicitar DNI ni RUC para reservar. Enviar null cuando no exista.",
+          },
+          nombre_cliente: {
+            type: "string",
+            description:
+              "Nombre del comensal o responsable de la reserva. Para reservas corporativas puede incluir el nombre de la empresa.",
+          },
+          telefono: {
+            type: "string",
+          },
+          correo: {
+            type: ["string", "null"],
+          },
+          numero_personas: {
+            type: "integer",
+            minimum: 1,
+          },
+          fecha: {
+            type: "string",
+            description: "Fecha en formato YYYY-MM-DD.",
+          },
+          hora: {
+            type: "string",
+            description: "Hora en formato HH:MM.",
+          },
+          motivo: {
+            type: "string",
+          },
+          metodo_pago: {
+            type: ["string", "null"],
+            enum: ["Yape", "Tarjeta", "Transferencia", null],
+            description:
+              "Método del adelanto, si existe. No significa que el pago haya sido verificado.",
+          },
+          monto: {
+            type: ["number", "null"],
+            description: "Monto del adelanto, si corresponde.",
+          },
+          id_pago_transaccion: {
+            type: ["string", "null"],
+            description:
+              "Referencia de la transacción proporcionada por el cliente. No constituye verificación del pago.",
+          },
+        },
+        required: [
+          "tipo_cliente",
+          "nombre_cliente",
+          "telefono",
+          "numero_personas",
+          "fecha",
+          "hora",
+        ],
+      },
+    },
+  },
   {
     type: "function",
     function: {
       name: "registrar_transaccion",
-      description: "Guarda el ID de la transacción, el monto y método de pago.",
+      description:
+        "Recibe los datos declarados de un adelanto. No verifica ni confirma el pago.",
       parameters: {
         type: "object",
         properties: {
-          metodo: { type: "string", enum: ["Yape", "Tarjeta", "Transferencia"] },
-          id_transaccion: { type: "string" },
-          monto: { type: "number", description: "El monto del pago realizado" }
+          metodo: {
+            type: "string",
+            enum: ["Yape", "Tarjeta", "Transferencia"],
+          },
+          id_transaccion: {
+            type: "string",
+          },
+          monto: {
+            type: "number",
+            minimum: 0.01,
+          },
         },
-        required: ["metodo", "id_transaccion", "monto"]
-      }
-    }
-  }
+        required: ["metodo", "id_transaccion", "monto"],
+      },
+    },
+  },
 ];
 
-// 🛠️ GRUPO B: Solo Personal/DNI
-const toolDni = {
-    type: "function",
-    function: {
-        name: "obtener_datos_dni",
-        description: "Busca los nombres y apellidos de un comensal usando su número de DNI",
-        parameters: {
-            type: "object",
-            properties: {
-                dni: { type: "string", description: "El número de DNI de 8 dígitos" }
-            },
-            required: ["dni"]
-        }
-    }
-};
-
-// 🛠️ GRUPO C: Solo Corporativa (RUC + Enlace)
 const toolsCorporativas = [
   {
     type: "function",
     function: {
-        name: "obtener_datos_ruc",
-        description: "Busca los datos de una empresa usando su número de RUC",
-        parameters: {
-            type: "object",
-            properties: {
-                ruc: { type: "string", description: "El número de RUC de 11 dígitos" }
-            },
-            required: ["ruc"]
-        }
-    }
-},
-  {
-    type: "function",
-    function: {
       name: "generar_enlace_formulario_corporativo",
-      description: "Genera el link para la lista de invitados. Solo debe llamarse DESPUÉS de guardar exitosamente la reserva.",
+      description:
+        "Recupera el enlace del formulario de invitados de una reserva corporativa previamente guardada.",
       parameters: {
         type: "object",
         properties: {
-          id_reserva_base: { type: "number", description: "El ID numérico (reservaId) retornado por confirmar_y_guardar_reserva" },
-          ruc: { type: "string" },
-          nombre: { type: "string" },
-          fecha: { type: "string" },
-          hora: { type: "string" },
-          motivo: { type: "string" }
+          id_reserva_base: {
+            type: "integer",
+            description: "ID de la reserva corporativa registrada.",
+          },
+          ruc: {
+            type: ["string", "null"],
+            description: "Dato opcional.",
+          },
+          nombre: {
+            type: "string",
+          },
+          fecha: {
+            type: "string",
+          },
+          hora: {
+            type: "string",
+          },
+          motivo: {
+            type: "string",
+          },
         },
-        required: ["id_reserva_base", "ruc", "nombre", "fecha", "hora", "motivo"]
-      }
-    }
-  }
+        required: ["id_reserva_base"],
+      },
+    },
+  },
 ];
-// ✅ FUNCIÓN AUXILIAR PARA VALIDAR MENSAJES
+
 const sanitizeMessages = (messages) => {
-  return messages.map(msg => ({
-    role: msg.role,
-    content: (msg.content && String(msg.content).trim()) || "Sin contenido disponible",
-    ...(msg.tool_call_id && { tool_call_id: msg.tool_call_id }),
-    ...(msg.name && { name: msg.name })
-  })).filter(msg => {
-    if (!msg.role || !['user', 'assistant', 'tool', 'system'].includes(msg.role)) {
-      console.warn('⚠️ Mensaje inválido descartado:', msg);
-      return false;
-    }
-    return true;
-  });
+  return messages
+    .filter( (msg) => msg && ["user", "assistant"].includes(msg.role) && typeof msg.content === "string" && msg.content.trim()
+    ) .map((msg) => ({
+      role: msg.role,
+      content: msg.content.trim(),
+    }));
 };
- 
 
-// ✅ CONTROLLER PRINCIPAL DEL CHAT
-export const chatController = async (req, res) => {
-  const { messages } = req.body;
-
-  // 1. Obtener el historial completo (solo mensajes del usuario para mayor precisión)
+const detectarTipoCliente = (messages) => {
   const historialUsuario = messages
-    .filter(m => m.role === 'user')
-    .map(m => m.content || '')
-    .join(' ')
+    .filter((msg) => msg.role === "user")
+    .map((msg) => msg.content || "")
+    .join(" ")
     .toLowerCase();
 
-  const ultimoMsjUsuario = [...messages].reverse().find(m => m.role === 'user');
-
-  console.log('📨 Nuevo mensaje recibido:', ultimoMsjUsuario ? `${ultimoMsjUsuario.content.substring(0, 50)}...` : 'No se encontró mensaje de usuario');
-  
-  // 2. Detección basada en TODO el historial, no solo el último mensaje
-  let clienteFinal = 'personal'; // Valor por defecto
-
-  if (historialUsuario.includes('ruc') || historialUsuario.includes('empresa') || historialUsuario.includes('corporativa')) {
-    clienteFinal = 'corporativa';
-  } else if (historialUsuario.includes('extranjero') || historialUsuario.includes('no peruano')) {
-    clienteFinal = 'extranjero';
-  } else if (historialUsuario.includes('dni') || historialUsuario.includes('personal') || historialUsuario.includes('familiar')) {
-    clienteFinal = 'personal';
+  if ( historialUsuario.includes("corporativa") || historialUsuario.includes("empresa") || historialUsuario.includes("empresarial") ) {
+    return "corporativa";
   }
 
-  // 3. Selección de Herramientas (Ahora clienteFinal es persistente)
-  let herramientasActivas = [...toolsComunes];
-
-  if (clienteFinal === 'corporativa') {
-    herramientasActivas = [...toolsComunes, ...toolsCorporativas];
-    
-  } else if (clienteFinal === 'personal') {
-    herramientasActivas = [...toolsComunes, toolDni];
-  } else {
-    herramientasActivas = [...toolsComunes];
+  if ( historialUsuario.includes("extranjero") || historialUsuario.includes("no peruano") || historialUsuario.includes("turista")) {
+    return "extranjero";
   }
 
-  
-  // 4. Inyectar el contexto reforzado (BLOQUE FUSIONADO)
-  const mainSystemPrompt = `${SYSTEM_PROMPT} 
+  return "personal";
+};
 
-  REGLAS DE EJECUCIÓN INMEDIATA:
-  1. Si detectas un número de 11 dígitos y el contexto es CORPORATIVO, USA 'obtener_datos_ruc' inmediatamente.
-  2. Si detectas un número de 8 dígitos y el contexto es PERSONAL, USA 'obtener_datos_dni' inmediatamente.
-  3. No inventes que validaste datos si no has llamado a la función correspondiente.
-  4.NO asumas que la reserva es corporativa si el cliente te ha dicho que es personal.
-  5.Si el cliente menciona que desea hacer un adelanto asegurate de tener el MONTO del adelanto y de llamar a 'registrar_transaccion' inmediatamente.
-  
+const normalizarDatosReserva = (args) => {
+  const datos = { ...args };
 
-  REGLAS DE CIERRE CORPORATIVO:
-  4. Si la reserva es CORPORATIVA y ya tienes todos los datos (RUC, Nombre, Teléfono, Correo, Fecha, Hora, Personas, Motivo), DEBES LLAMAR PRIMERO a 'confirmar_y_guardar_reserva' y ESPERAR su respuesta.
-  5. SOLO DESPUÉS de recibir el 'reservaId' confirmando que se guardó exitosamente, llama a 'generar_enlace_formulario_corporativo' usando ese ID numérico exacto. NUNCA llames a ambas herramientas al mismo tiempo.
-  6. IMPORTANTE: No anuncies "voy a generar el enlace"; simplemente ejecuta la función una vez guardada la reserva. Tu respuesta final DEBE mostrar EXACTAMENTE el valor del  'enlace o link formulario'  exacto devuelta por la función 'generar_enlace_formulario_corporativo', sin inventar, modificar ni acortar la URL.
-  6. IMPORTANTE: Tu respuesta final DEBE mostrar EXACTAMENTE el enlace que te devuelve la función 'generar_enlace_formulario_corporativo'. NO inventes, modifiques ni acortes la URL (está prohibido usar dominios como limeñita.com, debes usar la URL exacta provista).
-  7. Si te falta algún dato (como el teléfono), pídelo amablemente. NO ejecutes la función de guardado ni del enlace si faltan campos.`;
-  // 5. Historial de conversación
-  let conversationHistory = [
-    { role: 'system', content: mainSystemPrompt },
-    ...sanitizeMessages(messages)
+  if (!datos.identificador_fiscal) {
+    datos.identificador_fiscal = null;
+  }
+
+  if (!datos.correo) {
+    datos.correo = null;
+  }
+
+  if (!datos.motivo) {
+    datos.motivo = "Reserva estándar";
+  }
+
+  if (!datos.metodo_pago) {
+    datos.metodo_pago = null;
+  }
+
+  if (!datos.id_pago_transaccion) {
+    datos.id_pago_transaccion = null;
+  }
+
+  if (datos.monto === undefined || datos.monto === "") {
+    datos.monto = null;
+  }
+
+  return datos;
+};
+
+export const chatController = async (req, res) => {
+  const { messages } = req.body || {};
+
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return res.status(400).json({
+      error: "El campo messages es requerido y debe ser un array.",
+    });
+  }
+
+  const mensajesInvalidos = messages.some( (msg) => !msg || !["user", "assistant"].includes(msg.role) || typeof msg.content !== "string" );
+
+  if (mensajesInvalidos) {
+    return res.status(400).json({
+      error: "Formato de mensajes inválido.",
+    });
+  }
+
+  const historial = sanitizeMessages(messages);
+
+  if (!historial.some((msg) => msg.role === "user")) {
+    return res.status(400).json({
+      error: "Se requiere al menos un mensaje del usuario.",
+    });
+  }
+
+  const clienteFinal = detectarTipoCliente(historial);
+
+  const herramientasActivas =
+    clienteFinal === "corporativa"
+      ? [...toolsComunes, ...toolsCorporativas]
+      : [...toolsComunes];
+
+  const mainSystemPrompt = `${SYSTEM_PROMPT}
+
+REGLAS OPERATIVAS DEL SISTEMA:
+
+1. No solicites DNI ni RUC para registrar reservas.
+2. No consultes RENIEC, SUNAT ni servicios de identificación.
+3. Recopila nombre, teléfono, fecha, hora y cantidad de personas.
+4. Para reservas corporativas solicita también los datos de contacto y de la empresa definidos en el flujo.
+5. Solicita únicamente los datos que falten.
+6. Antes de guardar, muestra un resumen y solicita confirmación explícita.
+7. No ejecutes confirmar_y_guardar_reserva antes de esa confirmación.
+8. No inventes disponibilidad de mesas.
+9. No afirmes que una reserva está confirmada si el backend no devolvió un resultado exitoso.
+10. No afirmes que un pago está verificado por recibir un identificador de transacción.
+
+RESERVAS CORPORATIVAS:
+
+1. Guarda primero la reserva mediante confirmar_y_guardar_reserva.
+2. Si la herramienta devuelve linkFormulario, utiliza exactamente ese enlace.
+3. No inventes, modifiques ni acortes enlaces.
+4. No vuelvas a guardar una reserva para generar su formulario.
+5. No solicites RUC como requisito para obtener el enlace.
+
+PAGOS:
+
+1. Los adelantos son opcionales.
+2. No proceses pagos directamente.
+3. Un comprobante o referencia no demuestra que el dinero haya sido recibido.
+4. Si el sistema no verifica pagos, informa que quedan pendientes de revisión.
+`;
+
+  const conversationHistory = [
+    { role: "system", content: mainSystemPrompt },
+    ...historial,
   ];
 
-  console.log(`--- ESTADO DEL CHAT ---`);
-  console.log(`📨 Cliente Detectado: ${clienteFinal}`);
-  console.log(`🔧 Herramientas Cargadas:`, herramientasActivas.map(t => t.function.name).join(', '));
+  const ultimoMensaje = [...historial]
+    .reverse()
+    .find((msg) => msg.role === "user");
 
- 
- 
-  // Validación inicial
-  if (!Array.isArray(messages) || messages.length === 0) {
-    return res.status(400).json({ 
-      error: 'El campo messages es requerido y debe ser un array.' 
-    });
-  }
- 
-  const invalido = messages.some(
-    (m) => !m.role || !['user', 'assistant', 'system'].includes(m.role)
+  console.log(
+    "Nuevo mensaje recibido:",
+    ultimoMensaje?.content?.substring(0, 50) || "Sin contenido"
   );
-  
-  if (invalido) {
-    return res.status(400).json({ 
-      error: 'Formato de mensajes inválido.' 
-    });
-  }
- 
-  
- 
+
+  console.log("Tipo de cliente detectado:", clienteFinal);
+
   try {
     const completion = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      max_tokens: 300,
+      model: "gpt-4o-mini",
+      max_tokens: 500,
       temperature: 0.3,
       messages: conversationHistory,
       tools: herramientasActivas,
-      tool_choice: "auto"
+      tool_choice: "auto",
+      parallel_tool_calls: false,
     });
- 
-    let responseMessage = completion.choices[0].message;
+
+    const responseMessage = completion.choices[0]?.message;
+
+    if (!responseMessage) {
+      return res.status(502).json({
+        error: "El asistente no devolvió una respuesta válida.",
+      });
+    }
+
     const toolCalls = responseMessage.tool_calls;
- 
-    if (toolCalls) {
+
+    if (toolCalls?.length) {
       conversationHistory.push(responseMessage);
- 
+
       for (const toolCall of toolCalls) {
         const functionName = toolCall.function.name;
-        const args = JSON.parse(toolCall.function.arguments);
         let functionResponse;
- 
-        // ✅ MANEJAR HERRAMIENTA: generar_enlace_formulario_corporativo
-        if (functionName === "generar_enlace_formulario_corporativo") {
-          // Validar que se haya enviado un ID numérico válido retornado previamente
-          if (!args.id_reserva_base || isNaN(args.id_reserva_base)) {
-            functionResponse = {
-              success: false,
-              message: "ERROR: Faltan datos o el 'id_reserva_base' no es válido. Recuerda llamar primero a 'confirmar_y_guardar_reserva', esperar a que sea exitoso, y usar su 'reservaId'."
-            };
-            console.log('❌ Intento de generar enlace corporativo bloqueado por ID inválido:', args.id_reserva_base);
-          } else {
-            // Usamos directamente el ID de la reserva en la URL para evitar que el texto
-            // desborde el contenedor del chat y relacionarlo de forma exacta con la BD.
-            const enlaceFormulario = `${frontendUrl}/formulario-invitados/${args.id_reserva_base}`;
-   
-            functionResponse = {
-              success: true,
-              message: "Formulario corporativo generado exitosamente",
-              enlace: enlaceFormulario,
-              datosReserva: {
-                id_reserva_base: args.id_reserva_base,
-                ruc: args.ruc,
-                nombre: args.nombre,
-                fecha: args.fecha,
-                hora: args.hora,
-                motivo: args.motivo
+
+        try {
+          const args = JSON.parse(toolCall.function.arguments || "{}");
+
+          switch (functionName) {
+            case "confirmar_y_guardar_reserva": {
+              const datosReserva = normalizarDatosReserva(args);
+
+              const resultado = await GuardarReserva(datosReserva);
+
+              if (resultado?.success && resultado.insertId) {
+                functionResponse = {
+                  success: true,
+                  message: "Reserva registrada correctamente.",
+                  reservaId: resultado.insertId,
+                  linkFormulario: resultado.linkFormulario || null,
+                };
+              } else {
+                functionResponse = {
+                  success: false,
+                  message:
+                    resultado?.message ||
+                    "No fue posible registrar la reserva.",
+                };
               }
-            };
-   
-            console.log('✅ Enlace generado para:', args.nombre);
+
+              break;
+            }
+
+            case "generar_enlace_formulario_corporativo": {
+              // El enlace ya se genera en GuardarReserva.
+              functionResponse = {
+                success: false,
+                message:
+                  "El enlace corporativo se obtiene al guardar la reserva. Utilice el linkFormulario devuelto por confirmar_y_guardar_reserva.",
+              };
+
+              break;
+            }
+
+            case "registrar_transaccion": {
+              functionResponse = {
+                success: false,
+                verificado: false,
+                message:
+                  "Referencia recibida, pero no registrada ni verificada. El adelanto debe ser revisado por el restaurante.",
+              };
+
+              break;
+            }
+
+            default:
+              functionResponse = {
+                success: false,
+                message: "Función no reconocida.",
+              };
           }
- 
-        } else if (functionName === "obtener_datos_dni") {
-          functionResponse = await consultarDni(args.dni);
-          if (!functionResponse.success) {
-            functionResponse = { 
-              status: "error",
-              mensaje: functionResponse.message || "No disponible",
-              instruccion: "Por favor, proporciona tu nombre manualmente."
-            };
-          }
- 
-        } else if (functionName === "obtener_datos_ruc") {
-          functionResponse = await consultarRuc(args.ruc);
-          if (!functionResponse || !functionResponse.success) {
-            functionResponse = {
-              status: "error",
-              mensaje: functionResponse?.message || "RUC no encontrado",
-              instruccion: "Por favor, verifica el RUC ingresado."
-            };
-          }
- 
-        } else if (functionName === "confirmar_y_guardar_reserva") {
-          const datosIA = JSON.parse(toolCall.function.arguments);
-          const resultado = await GuardarReserva(datosIA);
-          
-          if (resultado.success && resultado.insertId) {
-            functionResponse = { 
-              success: true, 
-              message: "Reserva guardada correctamente",
-              reservaId: resultado.insertId,
-              linkFormulario: resultado.linkFormulario || null
-            };
-          } else {
-            functionResponse = { 
-              success: false, 
-              message: resultado.message || "Error al guardar la reserva"
-            };
-          }
- 
-        } else if (functionName === "registrar_transaccion") {
+        } catch (error) {
+          console.error(
+            `Error ejecutando ${functionName}:`,
+            error.message
+          );
+
           functionResponse = {
-            success: true,
-            message: "Transacción registrada correctamente"
-          };
-        } else {
-          functionResponse = {
-            status: "error",
-            message: "Función no reconocida"
+            success: false,
+            message: "No se pudo ejecutar la operación solicitada.",
           };
         }
- 
-        // ✅ Validar que functionResponse siempre tenga contenido
-        if (!functionResponse) {
-          functionResponse = {
-            status: "error",
-            message: "No se pudo procesar la función"
-          };
-        }
- 
+
         conversationHistory.push({
           tool_call_id: toolCall.id,
           role: "tool",
           name: functionName,
-          content: JSON.stringify(functionResponse)
+          content: JSON.stringify(functionResponse),
         });
       }
- 
-      // ✅ SEGUNDA LLAMADA A OPENAI
+
       const secondResponse = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
-        messages: conversationHistory
+        model: "gpt-4o-mini",
+        max_tokens: 500,
+        temperature: 0.3,
+        messages: conversationHistory,
+        tool_choice: "none",
       });
- 
-      const finalContent = secondResponse.choices[0].message.content;
-      if (!finalContent) {
-        return res.status(500).json({
-          error: 'La IA no retornó una respuesta válida'
+
+      const finalAssistantMessage = secondResponse.choices[0]?.message;
+
+      if (!finalAssistantMessage?.content) {
+        return res.status(502).json({
+          error: "La IA no retornó una respuesta válida.",
         });
       }
- 
-      return res.status(200).json({ 
-        result: secondResponse.choices[0].message 
+
+      return res.status(200).json({
+        result: finalAssistantMessage,
       });
     }
- 
-    // ✅ RESPUESTA SIN TOOL CALLS
-    const directContent = completion.choices[0].message.content;
-    if (!directContent) {
-      return res.status(500).json({
-        error: 'La IA no retornó una respuesta válida'
+
+    if (!responseMessage.content) {
+      return res.status(502).json({
+        error: "La IA no retornó una respuesta válida.",
       });
     }
- 
-    return res.status(200).json({ 
-      result: completion.choices[0].message 
+
+    return res.status(200).json({
+      result: responseMessage,
     });
-  
   } catch (error) {
-    console.error('❌ Error OpenAI:', error?.message || error);
- 
+    console.error("Error OpenAI:", error?.message || error);
+
     const esConfigError = error?.status === 401 || error?.status === 429;
- 
+
     return res.status(500).json({
       error: esConfigError
-        ? 'El servicio de IA no está disponible en este momento'
-        : 'Error interno al procesar su solicitud'
+        ? "El servicio de IA no está disponible en este momento."
+        : "Error interno al procesar su solicitud.",
     });
   }
 };
- 

@@ -793,7 +793,7 @@ const registrarReserva = async (sesion) => {
   }
 
   if (resultado.linkFormulario) {
-    contenido += ` Puede completar la información adicional aquí: ` + `[Formulario de reserva](${resultado.linkFormulario}).`;
+    contenido += ` En el siguiente enlace puede completar la información adicional(platos, bebidas) de sus invitados: ` + `[Registro de invitados](${resultado.linkFormulario}).`;
   }
 
   return {

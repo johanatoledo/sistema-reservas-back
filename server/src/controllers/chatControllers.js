@@ -8,8 +8,8 @@ dotenv.config();
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
-  timeout: 30000,
-  maxRetries: 1,
+  timeout: 45000,
+  maxRetries: 2,
 });
 
 const MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
@@ -1004,11 +1004,16 @@ export const chatController = async (req, res) => {
     // Primera presentación o renovación del resumen.
     return enviar(presentarResumen(sesion));
   } catch (error) {
-    console.error("Error chatController:", {
-      message: error.message,
-      status: error.status,
-      code: error.code,
-    });
+       console.error("Error chatController:", {
+         name: error.name,
+         message: error.message,
+         status: error.status,
+         code: error.code,
+         type: error.type,
+         request_id: error.request_id,
+         cause: error.cause?.message,
+         stack: error.stack,
+       });
 
     return res.status(503).json({
       error: "El asistente no está disponible temporalmente.",

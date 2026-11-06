@@ -19,10 +19,8 @@ Horarios:
 - Domingo: 12:00 p. m. a 5:00 p. m.
 
 Servicios:
-- Almuerzo: 12:30 p. m. a 4:15 p. m.
-- Coctelería: 4:15 p. m. a 5:30 p. m.
-  Durante este horario solo se ofrecen bebidas.
-- Cena: 5:30 p. m. a 10:00 p. m.
+- Almuerzo: 12:30 p. m. a 6 p. m.
+- Cena: 6:30 p. m. a 10:00 p. m.
   Se ofrece una carta reducida.
 - Show de danzas: domingos a las 2:30 p. m.
   en la terraza.

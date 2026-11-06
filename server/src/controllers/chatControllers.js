@@ -107,6 +107,30 @@ const limpiarTexto = (valor) =>
 
 const normalizarTexto = (valor) => limpiarTexto(valor).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
 
+const esConfirmacionDirecta = (mensaje) => {
+  const texto = normalizarTexto(mensaje)
+    .replace(/[.!¡¿?]/g, "")
+    .trim();
+
+  const confirmaciones = new Set([
+    "si",
+    "si claro",
+    "si por favor",
+    "confirmo",
+    "confirmado",
+    "correcto",
+    "esta correcto",
+    "todo correcto",
+    "de acuerdo",
+    "autorizo",
+    "autorizo el registro",
+    "puede registrar",
+    "proceda con la reserva",
+  ]);
+
+  return confirmaciones.has(texto);
+};
+
 const fechaLima = () => {
   const partes = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/Lima",
@@ -185,9 +209,7 @@ const validarHorario = (datos) => {
     return "De lunes a sábado atendemos de 12:30 p. m. a 10:00 p. m. ¿Qué otra hora prefiere?";
   }
 
-  if (minutos >= 975 && minutos < 1050) {
-    return "Entre las 4:15 p. m. y las 5:30 p. m. ofrecemos únicamente coctelería. Para disfrutar de la cena, podemos recibirle desde las 5:30 p. m. ¿Desea ajustar su horario?";
-  }
+ 
 
   return null;
 };
@@ -609,8 +631,8 @@ const preguntas = {
   correo: "¿A qué correo electrónico podemos enviarle la información de su reserva corporativa?",
   numero_personas: "¿Para cuántos comensales desea realizar la reserva?",
   fecha: "¿Para qué fecha desea realizar su reserva?",
-  hora: "¿A qué hora le gustaría visitarnos?",
-  motivo: "¿Cuál es el motivo de su visita? ¿Se trata de una ocasión especial?",
+  hora: "¿A qué hora desea realizar su reserva?",
+  motivo: "¿Cuál es el motivo de su visita? Por ejemplo, almuerzo, cena, celebración, reunión de negocios, etc.",
   metodo_pago: "¿Realizó el adelanto mediante Yape, tarjeta o transferencia?",
   monto: "¿Qué monto desea declarar como adelanto?",
   id_pago_transaccion: "¿Podría facilitarme el número de operación de su adelanto? Quedará pendiente de verificación.",
@@ -664,7 +686,8 @@ REGLAS:
 - Si falta información para responder, reconózcalo.
 - No afirme que se ha registrado ninguna reserva.
 - No formule una confirmación definitiva de registro en esta respuesta.
-- Sea breve y mantenga un tono humano.`,
+- Sea breve y mantenga un tono humano.
+- Una vez que has presentado el resumen, y que el cliente haya confirmado, no repita la información de contacto ni el resumen completo.Despidase cordialmente e informe de que la reserva ha sido registrada y que el equipo se comunicará para confirmar la disponibilidad de la mesa y el pago en caso de que haya adelanto.`,
       },
       ...historial.slice(-8),
       { role: "user", content: mensaje },
@@ -981,7 +1004,9 @@ export const chatController = async (req, res) => {
     }
 
     // La confirmación solo es válida para el resumen vigente.
-    const puedeRegistrar = habiaResumenVigente && confirmacionVigente(sesion) && !actualizado && !cambioPago && !hayConsulta && !hayCondicion && !hayAmbiguedad && interpretacion.confirmacion_definitiva === true && intenciones.has("confirmar");
+    const confirmacionExplicita = esConfirmacionDirecta(mensaje) || ( interpretacion.confirmacion_definitiva === true && intenciones.has("confirmar") );
+
+    const puedeRegistrar = habiaResumenVigente && confirmacionVigente(sesion) && !actualizado && !cambioPago && !hayConsulta && !hayCondicion && !hayAmbiguedad && confirmacionExplicita;
 
     if (puedeRegistrar) {
       const resultado = await registrarReserva(sesion);
@@ -998,7 +1023,7 @@ export const chatController = async (req, res) => {
     if (confirmacionVigente(sesion)) {
       sesion.consultaPendiente = false;
 
-      return enviar( "Con mucho gusto. Ya tenemos todos los datos de su solicitud. ¿Autoriza expresamente que registremos la reserva con el último resumen presentado?" );
+      return enviar(   "¿Desea confirmar su solicitud de reserva con los datos que hemos revisado?" );
     }
 
     // Primera presentación o renovación del resumen.

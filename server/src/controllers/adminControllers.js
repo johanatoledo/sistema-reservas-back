@@ -111,6 +111,24 @@ export const GuardarReserva = async (datos) => {
       };
     }
 
+    const montoAdelanto = Number(datos.monto ?? 0);
+ 
+     if (!Number.isFinite(montoAdelanto) || montoAdelanto < 0) {
+       return {
+        success: false,
+        message: "El monto del adelanto no es válido.",
+      };
+      }
+
+      if (montoAdelanto > 0) {
+        if (!datos.metodo_pago || !datos.id_pago_transaccion?.trim()) {
+          return {
+             success: false,
+             message: "Para registrar un adelanto debe indicar el método de pago y el número de operación.",
+         };
+       }
+      }
+
     const query = `
       INSERT INTO reservas (
         tipo_cliente,

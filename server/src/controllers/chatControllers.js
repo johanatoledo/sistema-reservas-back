@@ -13,528 +13,812 @@ const openai = new OpenAI({
 });
 
 const MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
-const MAX_MESSAGES = 60;
-const MAX_MESSAGE_LENGTH = 4000;
+const SESION_TTL = 60 * 60 * 1000;
+const MAX_SESIONES = 2000;
 
-const tools = [
-  {
-    type: "function",
-    function: {
-      name: "confirmar_y_guardar_reserva",
-      description:
-        "Registra una solicitud de reserva después de mostrar un resumen y recibir la confirmación explícita del comensal. Los adelantos requieren método, monto y referencia. No verifica pagos ni confirma disponibilidad.",
-      parameters: {
-        type: "object",
-        properties: {
-          tipo_cliente: {
-            type: "string",
-            enum: ["personal", "corporativa", "extranjero"],
-          },
-          identificador_fiscal: {
-            type: ["string", "null"],
-            description:
-              "Campo opcional por compatibilidad. No solicitar DNI ni RUC. Enviar null.",
-          },
-          nombre_cliente: {
-            type: "string",
-            description:
-              "Nombre completo del responsable. Para reservas corporativas puede incluir la empresa.",
-          },
-          telefono: {
-            type: "string",
-          },
-          correo: {
-            type: ["string", "null"],
-          },
-          numero_personas: {
-            type: "integer",
-            minimum: 1,
-          },
-          fecha: {
-            type: "string",
-            description: "Fecha YYYY-MM-DD.",
-          },
-          hora: {
-            type: "string",
-            description: "Hora HH:MM en horario de Lima.",
-          },
-          motivo: {
-            type: "string",
-          },
-          metodo_pago: {
-            type: ["string", "null"],
-            enum: ["Yape", "Tarjeta", "Transferencia", null],
-            description:
-              "Método del adelanto. Null si no existe adelanto.",
-          },
-          monto: {
-            type: ["number", "null"],
-            description:
-              "Monto del adelanto declarado. Null si no existe.",
-          },
-          id_pago_transaccion: {
-            type: ["string", "null"],
-            description:
-              "Referencia declarada por el comensal. No implica verificación bancaria.",
-          },
-        },
-        required: [
-          "tipo_cliente",
-          "nombre_cliente",
-          "telefono",
-          "numero_personas",
-          "fecha",
-          "hora",
-        ],
-      },
-    },
-  },
+const sesiones = new Map();
+
+const CAMPOS = [
+  "tipo_cliente",
+  "nombre_cliente",
+  "telefono",
+  "correo",
+  "numero_personas",
+  "fecha",
+  "hora",
+  "motivo",
+  "metodo_pago",
+  "monto",
+  "id_pago_transaccion",
 ];
 
-const texto = (valor) =>
+const crearDatos = () => ({
+  tipo_cliente: null,
+  identificador_fiscal: null,
+  nombre_cliente: null,
+  telefono: null,
+  correo: null,
+  numero_personas: null,
+  fecha: null,
+  hora: null,
+  motivo: null,
+  metodo_pago: null,
+  monto: null,
+  id_pago_transaccion: null,
+});
+
+const crearSesion = () => ({
+  datos: crearDatos(),
+  estado: "recopilando",
+  version: 0,
+  versionConfirmada: null,
+  resumenPendiente: false,
+  reservaId: null,
+  ultimaPeticion: null,
+  ultimaRespuesta: null,
+  actualizadoEn: Date.now(),
+  ocupado: false,
+});
+
+const obtenerSesion = (id) => {
+  const ahora = Date.now();
+
+  for (const [key, sesion] of sesiones) {
+    if (!sesion.ocupado && ahora - sesion.actualizadoEn > SESION_TTL) {
+      sesiones.delete(key);
+    }
+  }
+
+  if (!sesiones.has(id)) {
+    if (sesiones.size >= MAX_SESIONES) {
+      throw new Error("CAPACIDAD_SESIONES");
+    }
+    sesiones.set(id, crearSesion());
+  }
+
+  const sesion = sesiones.get(id);
+  sesion.actualizadoEn = ahora;
+  return sesion;
+};
+
+const limpiarTexto = (valor) =>
   typeof valor === "string" ? valor.trim() : "";
 
 const normalizarTexto = (valor) =>
-  texto(valor)
+  limpiarTexto(valor)
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase();
 
-const sanitizeMessages = (messages) =>
-  messages
-    .filter(
-      (msg) =>
-        msg &&
-        ["user", "assistant"].includes(msg.role) &&
-        typeof msg.content === "string" &&
-        msg.content.trim()
-    )
-    .map(({ role, content }) => ({
-      role,
-      content: content.trim(),
-    }));
-
-const esConfirmacion = (mensaje) => {
-  const valor = normalizarTexto(mensaje);
-
-  return /^(si|si correcto|correcto|confirmo|confirmado|confirmar|confirmar reserva|confirmo la reserva|si confirmo|si confirmo la reserva|esta correcto|todo correcto|de acuerdo|yes|yes confirm|i confirm|confirmed|correct|ok|okay|vale|listo|adelante|proceda|puede registrarla)[.! ]*$/.test(
-    valor
-  );
-};
-
-const tieneResumenPrevio = (historial) => {
-  const ultimoUsuario = historial.findLastIndex(
-    (msg) => msg.role === "user"
-  );
-
-  if (ultimoUsuario < 1) return false;
-
-  const anterior = historial
-    .slice(0, ultimoUsuario)
-    .reverse()
-    .find((msg) => msg.role === "assistant");
-
-  if (!anterior) return false;
-
-  const contenido = normalizarTexto(anterior.content);
-
-  const tieneFecha = /fecha|date|dia/.test(contenido);
-  const tieneHora = /hora|time/.test(contenido);
-  const tienePersonas = /persona|comensal|asistente|guest|people/.test(
-    contenido
-  );
-
-  return tieneFecha && tieneHora && tienePersonas;
-};
-
-const validarFecha = (fecha) => {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(fecha)) return false;
-
-  const [year, month, day] = fecha.split("-").map(Number);
-  const fechaUTC = new Date(Date.UTC(year, month - 1, day));
-
-  return (
-    fechaUTC.getUTCFullYear() === year &&
-    fechaUTC.getUTCMonth() === month - 1 &&
-    fechaUTC.getUTCDate() === day
-  );
-};
-
-const obtenerFechaLima = () =>
-  new Intl.DateTimeFormat("en-CA", {
+const fechaLima = () => {
+  const partes = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/Lima",
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
-  }).format(new Date());
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date());
 
-const validarHorario = (fecha, hora) => {
-  if (!/^\d{2}:\d{2}$/.test(hora)) {
-    return "La hora debe tener formato HH:MM.";
+  const valor = (tipo) =>
+    partes.find((parte) => parte.type === tipo)?.value;
+
+  return {
+    fecha: `${valor("year")}-${valor("month")}-${valor("day")}`,
+    hora: `${valor("hour")}:${valor("minute")}`,
+  };
+};
+
+const fechaValida = (valor) => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(valor || "")) return false;
+
+  const [y, m, d] = valor.split("-").map(Number);
+  const fecha = new Date(Date.UTC(y, m - 1, d));
+
+  return (
+    fecha.getUTCFullYear() === y &&
+    fecha.getUTCMonth() === m - 1 &&
+    fecha.getUTCDate() === d
+  );
+};
+
+const horaValida = (valor) => {
+  if (!/^\d{2}:\d{2}$/.test(valor || "")) return false;
+  const [h, m] = valor.split(":").map(Number);
+  return h >= 0 && h <= 23 && m >= 0 && m <= 59;
+};
+
+const validarHorario = (datos) => {
+  if (!datos.fecha || !datos.hora) return null;
+
+  if (!fechaValida(datos.fecha)) {
+    return "La fecha indicada no es válida.";
   }
 
-  const [h, m] = hora.split(":").map(Number);
-
-  if (h > 23 || m > 59) {
+  if (!horaValida(datos.hora)) {
     return "La hora indicada no es válida.";
   }
 
-  const minutos = h * 60 + m;
-  const [year, month, day] = fecha.split("-").map(Number);
-  const diaSemana = new Date(
-    Date.UTC(year, month - 1, day)
-  ).getUTCDay();
+  const ahora = fechaLima();
 
-  if (diaSemana === 0) {
-    if (minutos < 720 || minutos > 1020) {
-      return "Los domingos atendemos de 12:00 a 17:00.";
-    }
-  } else if (minutos < 750 || minutos > 1320) {
-    return "De lunes a sábado atendemos de 12:30 a 22:00.";
+  if (
+    datos.fecha < ahora.fecha ||
+    (datos.fecha === ahora.fecha && datos.hora <= ahora.hora)
+  ) {
+    return "La fecha y hora de la reserva deben ser futuras.";
   }
 
-  if (diaSemana !== 0 && minutos > 975 && minutos < 1050) {
-    return "Entre 16:15 y 17:30 solo se ofrece coctelería.";
+  const [y, m, d] = datos.fecha.split("-").map(Number);
+  const domingo = new Date(Date.UTC(y, m - 1, d)).getUTCDay() === 0;
+  const [h, min] = datos.hora.split(":").map(Number);
+  const minutos = h * 60 + min;
+
+  if (domingo) {
+    if (minutos < 720 || minutos >= 1020) {
+      return "Los domingos atendemos de 12:00 p. m. a 5:00 p. m. ¿Qué otra hora prefiere?";
+    }
+    return null;
+  }
+
+  if (minutos < 750 || minutos >= 1320) {
+    return "De lunes a sábado atendemos de 12:30 p. m. a 10:00 p. m. ¿Qué otra hora prefiere?";
+  }
+
+  if (minutos >= 975 && minutos < 1050) {
+    return "A esa hora ofrecemos únicamente coctelería. Para disfrutar de la cena, podemos recibirle desde las 5:30 p. m. ¿Desea cambiar la hora?";
   }
 
   return null;
 };
 
-const normalizarDatosReserva = (args) => ({
-  tipo_cliente: texto(args.tipo_cliente).toLowerCase(),
-  identificador_fiscal: null,
-  nombre_cliente: texto(args.nombre_cliente),
-  telefono: texto(args.telefono),
-  correo: texto(args.correo) || null,
-  numero_personas: Number(args.numero_personas),
-  fecha: texto(args.fecha),
-  hora: texto(args.hora),
-  motivo: texto(args.motivo) || "Reserva estándar",
-  metodo_pago: texto(args.metodo_pago) || null,
-  monto: args.monto == null ? null : Number(args.monto),
-  id_pago_transaccion: texto(args.id_pago_transaccion) || null,
-});
+const normalizarCampo = (campo, valor) => {
+  if (valor === undefined) return undefined;
+  if (valor === null) return null;
 
-const validarReserva = (datos) => {
-  const tipos = ["personal", "corporativa", "extranjero"];
+  if (campo === "numero_personas") {
+    const n = Number(valor);
+    return Number.isInteger(n) && n > 0 ? n : undefined;
+  }
 
-  if (!tipos.includes(datos.tipo_cliente)) {
-    return "El tipo de reserva no es válido.";
+  if (campo === "monto") {
+    const n = Number(valor);
+    return Number.isFinite(n) && n >= 0 ? n : undefined;
+  }
+
+  if (typeof valor !== "string") return undefined;
+
+  const limpio = valor.trim();
+  if (!limpio) return null;
+
+  if (campo === "tipo_cliente") {
+    return ["personal", "corporativa", "extranjero"].includes(
+      limpio.toLowerCase()
+    )
+      ? limpio.toLowerCase()
+      : undefined;
+  }
+
+  if (campo === "metodo_pago") {
+    const metodo = normalizarTexto(limpio);
+
+    if (metodo === "yape") return "Yape";
+    if (metodo === "tarjeta") return "Tarjeta";
+    if (metodo === "transferencia") return "Transferencia";
+    return undefined;
+  }
+
+  if (campo === "fecha") {
+    return fechaValida(limpio) ? limpio : undefined;
+  }
+
+  if (campo === "hora") {
+    return horaValida(limpio) ? limpio : undefined;
+  }
+
+  return limpio.slice(0, 250);
+};
+
+const actualizarDatos = (sesion, cambios) => {
+  let actualizado = false;
+
+  for (const campo of CAMPOS) {
+    if (!Object.prototype.hasOwnProperty.call(cambios, campo)) {
+      continue;
+    }
+
+    const nuevoValor = normalizarCampo(campo, cambios[campo]);
+
+    if (nuevoValor === undefined) continue;
+
+    if (sesion.datos[campo] !== nuevoValor) {
+      sesion.datos[campo] = nuevoValor;
+      actualizado = true;
+    }
+  }
+
+  if (actualizado) {
+    sesion.version++;
+    sesion.resumenPendiente = false;
+    sesion.versionConfirmada = null;
+
+    if (sesion.estado !== "registrada") {
+      sesion.estado = "recopilando";
+    }
+  }
+
+  return actualizado;
+};
+
+const camposFaltantes = (datos) => {
+  const requeridos = [
+    "tipo_cliente",
+    "nombre_cliente",
+    "telefono",
+    "numero_personas",
+    "fecha",
+    "hora",
+    "motivo",
+  ];
+
+  if (datos.tipo_cliente === "corporativa") {
+    requeridos.push("correo");
+  }
+
+  const faltantes = requeridos.filter((campo) => {
+    const valor = datos[campo];
+    return valor === null || valor === undefined || valor === "";
+  });
+
+  if (datos.monto !== null && datos.monto > 0) {
+    for (const campo of ["metodo_pago", "id_pago_transaccion"]) {
+      if (!datos[campo]) faltantes.push(campo);
+    }
+  }
+
+  return faltantes;
+};
+
+const validarDatos = (datos) => {
+  if (!["personal", "corporativa", "extranjero"].includes(datos.tipo_cliente)) {
+    return "Debe indicar el tipo de reserva.";
   }
 
   if (!datos.nombre_cliente || !datos.telefono) {
-    return "Faltan el nombre o el teléfono del responsable.";
+    return "Faltan los datos de contacto.";
+  }
+
+  if (!/^\+?[\d\s()-]{7,20}$/.test(datos.telefono)) {
+    return "El teléfono de contacto no tiene un formato válido.";
+  }
+
+  if (
+    datos.correo &&
+    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(datos.correo)
+  ) {
+    return "El correo electrónico no es válido.";
   }
 
   if (
     !Number.isInteger(datos.numero_personas) ||
     datos.numero_personas < 1
   ) {
-    return "La cantidad de personas no es válida.";
+    return "La cantidad de comensales no es válida.";
   }
 
-  if (!validarFecha(datos.fecha)) {
-    return "La fecha de reserva no es válida.";
+  const horario = validarHorario(datos);
+  if (horario) return horario;
+
+  if (datos.monto !== null && datos.monto < 0) {
+    return "El monto del adelanto no es válido.";
   }
 
-  if (datos.fecha < obtenerFechaLima()) {
-    return "La fecha de reserva no puede ser anterior a hoy.";
-  }
-
-  const errorHorario = validarHorario(datos.fecha, datos.hora);
-  if (errorHorario) return errorHorario;
-
-  if (datos.monto !== null) {
-    if (!Number.isFinite(datos.monto) || datos.monto < 0) {
-      return "El monto del adelanto no es válido.";
+  if (datos.monto > 0) {
+    if (!datos.metodo_pago || !datos.id_pago_transaccion) {
+      return "Para registrar el adelanto se necesita el método y el número de operación.";
     }
-  }
-
-  const tieneAdelanto = datos.monto !== null && datos.monto > 0;
-
-  if (tieneAdelanto) {
-    if (
-      !["Yape", "Tarjeta", "Transferencia"].includes(
-        datos.metodo_pago
-      )
-    ) {
-      return "Debe indicar un método de adelanto válido.";
-    }
-
-    if (!datos.id_pago_transaccion) {
-      return "Debe proporcionar el número de operación del adelanto.";
-    }
-  } else {
-    if (datos.metodo_pago || datos.id_pago_transaccion) {
-      return "Debe aclarar el monto del adelanto declarado.";
-    }
-
-    datos.monto = null;
-    datos.metodo_pago = null;
-    datos.id_pago_transaccion = null;
+  } else if (datos.metodo_pago || datos.id_pago_transaccion) {
+    return "Es necesario aclarar el monto del adelanto.";
   }
 
   return null;
 };
 
-const respuesta = (res, content, status = 200) =>
-  res.status(status).json({
-    result: {
-      role: "assistant",
-      content,
+const herramientasExtraccion = [
+  {
+    type: "function",
+    function: {
+      name: "interpretar_mensaje",
+      description:
+        "Extrae solamente los datos nuevos o corregidos expresamente por el comensal. No inventes datos, no repitas campos sin cambios y no solicites documentos.",
+      parameters: {
+        type: "object",
+        properties: {
+          cambios: {
+            type: "object",
+            properties: {
+              tipo_cliente: {
+                type: ["string", "null"],
+                enum: ["personal", "corporativa", "extranjero", null],
+              },
+              nombre_cliente: { type: ["string", "null"] },
+              telefono: { type: ["string", "null"] },
+              correo: { type: ["string", "null"] },
+              numero_personas: { type: ["integer", "null"] },
+              fecha: { type: ["string", "null"] },
+              hora: { type: ["string", "null"] },
+              motivo: { type: ["string", "null"] },
+              metodo_pago: {
+                type: ["string", "null"],
+                enum: ["Yape", "Tarjeta", "Transferencia", null],
+              },
+              monto: { type: ["number", "null"] },
+              id_pago_transaccion: { type: ["string", "null"] },
+            },
+            additionalProperties: false,
+          },
+          intencion: {
+            type: "string",
+            enum: [
+              "reservar",
+              "confirmar",
+              "corregir",
+              "cancelar",
+              "consultar",
+              "otra",
+            ],
+          },
+          respuesta_corta: {
+            type: ["string", "null"],
+            description:
+              "Solo para preguntas generales sobre el restaurante. No inventar disponibilidad, precios ni pagos.",
+          },
+        },
+        required: ["cambios", "intencion", "respuesta_corta"],
+        additionalProperties: false,
+      },
     },
+  },
+];
+
+const interpretarMensaje = async (mensaje, sesion, historial) => {
+  const ahora = fechaLima();
+
+  const completion = await openai.chat.completions.create({
+    model: MODEL,
+    temperature: 0,
+    max_tokens: 450,
+    messages: [
+      {
+        role: "system",
+        content: `${SYSTEM_PROMPT}
+
+TAREA ACTUAL: extraer información, no registrar reservas.
+
+Fecha en Lima: ${ahora.fecha}.
+Hora en Lima: ${ahora.hora}.
+
+Datos ya recopilados:
+${JSON.stringify(sesion.datos)}
+
+Reglas:
+- Extrae solo los campos nuevos o corregidos del último mensaje.
+- Si el cliente ya indicó tres personas, no modifiques ese dato salvo corrección explícita.
+- Interpreta "mañana", "este sábado" y fechas relativas usando la fecha de Lima.
+- Convierte horas a HH:MM de 24 horas.
+- Si el cliente cambia la hora, modifica únicamente hora.
+- No infieras DNI, RUC ni identificadores fiscales.
+- Si confirma el resumen sin modificar datos, usa intencion confirmar y cambios {}.
+- Si responde "sí" a una propuesta de cambio de hora, utiliza el contexto inmediato para extraer la hora propuesta.
+- Si rechaza o corrige un dato, usa intencion corregir.
+- No confundas una aceptación de horario con la confirmación final de una reserva.
+- No infieras pagos realizados.
+- Un número de operación declarado no prueba que el pago se haya recibido.
+- Nunca inventes datos ausentes.`,
+      },
+      ...historial.slice(-12),
+      { role: "user", content: mensaje },
+    ],
+    tools: herramientasExtraccion,
+    tool_choice: {
+      type: "function",
+      function: { name: "interpretar_mensaje" },
+    },
+    parallel_tool_calls: false,
   });
 
-const crearPrompt = () => {
-  const fechaActual = obtenerFechaLima();
+  const llamada = completion.choices[0]?.message?.tool_calls?.[0];
 
-  return `${SYSTEM_PROMPT}
+  if (!llamada?.function?.arguments) {
+    throw new Error("EXTRACCION_SIN_RESULTADO");
+  }
 
-REGLAS OPERATIVAS OBLIGATORIAS:
+  const resultado = JSON.parse(llamada.function.arguments);
 
-- Hoy en Lima es ${fechaActual}.
-- No solicites DNI, RUC, pasaporte ni otros documentos.
-- No consultes servicios de identificación.
-- No inventes información ni resultados.
-- Recopila los datos de la reserva progresivamente.
-- No repitas preguntas ya respondidas.
-- El adelanto es opcional.
-- Si el comensal declara un adelanto, solicita método, monto y referencia.
-- No afirmes que un adelanto fue verificado.
-- No prometas disponibilidad de mesas.
-- Antes de guardar, presenta un resumen completo.
-- Espera confirmación explícita del comensal.
-- Utiliza confirmar_y_guardar_reserva una sola vez.
-- No ejecutes herramientas para consultar DNI o RUC.
-- Si el registro falla, explica que la solicitud no fue guardada.
-- Si el registro funciona, informa que está pendiente de confirmación del restaurante.
-- Si se devuelve linkFormulario, comparte exactamente ese enlace.
-- No inventes códigos de reserva ni enlaces.
-- No comuniques que una reserva está confirmada por el restaurante sin evidencia.
-- Si se produce un error técnico, no solicites nuevamente documentos.
-`;
+  return {
+    cambios: resultado.cambios || {},
+    intencion: resultado.intencion || "otra",
+    respuesta_corta: resultado.respuesta_corta || null,
+  };
 };
 
-export const chatController = async (req, res) => {
-  const { messages } = req.body || {};
+const formatearHora = (hora) => {
+  if (!hora) return "Sin definir";
 
-  if (!Array.isArray(messages) || messages.length === 0) {
+  const [h, m] = hora.split(":").map(Number);
+  const periodo = h >= 12 ? "p. m." : "a. m.";
+  const hora12 = h % 12 || 12;
+
+  return `${hora12}:${String(m).padStart(2, "0")} ${periodo}`;
+};
+
+const crearResumen = (datos) => {
+  const lineas = [
+    "Con mucho gusto. Le presento el resumen de su solicitud:",
+    "",
+    `Nombre: ${datos.nombre_cliente}`,
+    `Teléfono: ${datos.telefono}`,
+    `Tipo de reserva: ${datos.tipo_cliente}`,
+    `Fecha: ${datos.fecha}`,
+    `Hora: ${formatearHora(datos.hora)}`,
+    `Número de comensales: ${datos.numero_personas}`,
+    `Motivo: ${datos.motivo}`,
+  ];
+
+  if (datos.correo) {
+    lineas.push(`Correo: ${datos.correo}`);
+  }
+
+  if (datos.monto > 0) {
+    lineas.push(
+      `Adelanto declarado: S/ ${datos.monto.toFixed(2)}`,
+      `Método: ${datos.metodo_pago}`,
+      `Referencia: ${datos.id_pago_transaccion}`,
+      "El adelanto queda pendiente de verificación."
+    );
+  } else {
+    lineas.push("Adelanto: No declarado");
+  }
+
+  lineas.push(
+    "",
+    "¿Son correctos estos datos y autoriza que registremos su solicitud de reserva?"
+  );
+
+  return lineas.join("\n");
+};
+
+const preguntas = {
+  tipo_cliente:
+    "¿Desea realizar una reserva personal o corporativa?",
+  nombre_cliente:
+    "¿Me indica su nombre completo, por favor?",
+  telefono:
+    "¿Podría facilitarme un número de teléfono de contacto?",
+  correo:
+    "¿A qué correo electrónico podemos enviarle la información de su reserva corporativa?",
+  numero_personas:
+    "¿Para cuántos comensales desea realizar la reserva?",
+  fecha:
+    "¿Para qué fecha desea realizar su reserva?",
+  hora:
+    "¿A qué hora le gustaría visitarnos?",
+  motivo:
+    "¿Cuál es el motivo de su visita? ¿Se trata de una celebración o de una ocasión especial?",
+  metodo_pago:
+    "¿Por qué medio realizó el adelanto: Yape, tarjeta o transferencia?",
+  monto:
+    "¿Qué monto de adelanto desea declarar?",
+  id_pago_transaccion:
+    "¿Podría indicarme el número de operación de su adelanto? Quedará pendiente de verificación.",
+};
+
+const responder = (res, contenido, sesion, status = 200) => {
+  const payload = {
+    result: {
+      role: "assistant",
+      content: contenido,
+    },
+    estado: sesion.estado,
+  };
+
+  res.status(status).json(payload);
+  return payload;
+};
+
+const respuestaConsulta = async (mensaje, sesion) => {
+  const completion = await openai.chat.completions.create({
+    model: MODEL,
+    temperature: 0.3,
+    max_tokens: 300,
+    messages: [
+      {
+        role: "system",
+        content: `${SYSTEM_PROMPT}
+
+Responda de manera breve, cálida y elegante.
+Trate al comensal de usted.
+No solicite DNI ni RUC.
+No afirme que existe disponibilidad.
+No invente precios, promociones ni pagos confirmados.
+No registre reservas.
+Datos ya recopilados: ${JSON.stringify(sesion.datos)}`,
+      },
+      { role: "user", content: mensaje },
+    ],
+  });
+
+  return (
+    completion.choices[0]?.message?.content ||
+    "Con mucho gusto. ¿En qué puedo ayudarle?"
+  );
+};
+
+const prepararDatosGuardar = (datos) => ({
+  ...datos,
+  identificador_fiscal: null,
+  correo: datos.correo || null,
+  monto: datos.monto || null,
+  metodo_pago: datos.monto > 0 ? datos.metodo_pago : null,
+  id_pago_transaccion:
+    datos.monto > 0 ? datos.id_pago_transaccion : null,
+});
+
+export const chatController = async (req, res) => {
+  const { sessionId, messages } = req.body || {};
+
+  if (
+    typeof sessionId !== "string" ||
+    !/^[a-f0-9-]{36}$/i.test(sessionId)
+  ) {
     return res.status(400).json({
-      error: "Debe proporcionar un historial de mensajes.",
+      error: "Identificador de sesión inválido.",
     });
   }
 
   if (
-    messages.length > MAX_MESSAGES ||
-    messages.some(
-      (msg) =>
-        !msg ||
-        !["user", "assistant"].includes(msg.role) ||
-        typeof msg.content !== "string" ||
-        msg.content.length > MAX_MESSAGE_LENGTH
-    )
+    !Array.isArray(messages) ||
+    messages.length === 0 ||
+    messages.length > 60
   ) {
     return res.status(400).json({
-      error: "El historial de mensajes no es válido.",
+      error: "Historial de conversación inválido.",
     });
   }
 
-  const historial = sanitizeMessages(messages);
+  const historial = messages.filter(
+    (m) =>
+      m &&
+      ["user", "assistant"].includes(m.role) &&
+      typeof m.content === "string" &&
+      m.content.length <= 4000
+  );
 
-  if (!historial.length || historial.at(-1).role !== "user") {
+  if (historial.length !== messages.length) {
     return res.status(400).json({
-      error: "El último mensaje debe ser del comensal.",
+      error: "El historial contiene mensajes inválidos.",
     });
   }
 
-  const ultimoMensaje = historial.at(-1).content;
+  const ultimo = historial.at(-1);
 
-  const conversationHistory = [
-    {
-      role: "system",
-      content: crearPrompt(),
-    },
-    ...historial,
-  ];
+  if (!ultimo || ultimo.role !== "user" || !ultimo.content.trim()) {
+    return res.status(400).json({
+      error: "Se requiere un mensaje del comensal.",
+    });
+  }
+
+  let sesion;
 
   try {
-    const completion = await openai.chat.completions.create({
-      model: MODEL,
-      messages: conversationHistory,
-      tools,
-      tool_choice: "auto",
-      parallel_tool_calls: false,
-      temperature: 0.3,
-      max_tokens: 650,
+    sesion = obtenerSesion(sessionId);
+  } catch {
+    return res.status(503).json({
+      error: "El servicio está ocupado. Inténtelo nuevamente.",
     });
+  }
 
-    const responseMessage = completion.choices[0]?.message;
+  if (sesion.ocupado) {
+    return res.status(409).json({
+      error: "Ya estamos procesando un mensaje de esta conversación.",
+    });
+  }
 
-    if (!responseMessage) {
-      return respuesta(
-        res,
-        "Disculpe, no pude procesar su solicitud. Inténtelo nuevamente.",
-        502
+  const mensaje = ultimo.content.trim();
+  const peticion = JSON.stringify(historial);
+
+  if (
+    sesion.ultimaPeticion === peticion &&
+    sesion.ultimaRespuesta
+  ) {
+    return res.json(sesion.ultimaRespuesta);
+  }
+
+  sesion.ocupado = true;
+
+  const enviar = (contenido, status = 200) => {
+    const payload = responder(res, contenido, sesion, status);
+
+    if (status === 200) {
+      sesion.ultimaPeticion = peticion;
+      sesion.ultimaRespuesta = payload;
+    }
+
+    return payload;
+  };
+
+  try {
+    if (sesion.estado === "registrada") {
+      return enviar(
+        `Su solicitud ya fue registrada con el número ${sesion.reservaId}. El restaurante se comunicará con usted para confirmar la disponibilidad. ¿Puedo ayudarle con alguna otra consulta?`
       );
     }
 
-    const toolCalls = responseMessage.tool_calls || [];
+    const interpretacion = await interpretarMensaje(
+      mensaje,
+      sesion,
+      historial.slice(0, -1)
+    );
 
-    if (!toolCalls.length) {
-      return respuesta(
-        res,
-        responseMessage.content ||
-          "Disculpe, no pude generar una respuesta."
+    const estabaEsperandoConfirmacion =
+      sesion.resumenPendiente &&
+      sesion.versionConfirmada === sesion.version;
+
+    const huboCambios = actualizarDatos(
+      sesion,
+      interpretacion.cambios
+    );
+
+    if (interpretacion.intencion === "cancelar") {
+      sesion.datos = crearDatos();
+      sesion.version++;
+      sesion.resumenPendiente = false;
+      sesion.versionConfirmada = null;
+      sesion.estado = "recopilando";
+
+      return enviar(
+        "He descartado los datos de esta solicitud. Si desea comenzar una nueva reserva, será un placer atenderle."
       );
     }
 
-    const confirmado =
-      esConfirmacion(ultimoMensaje) &&
-      tieneResumenPrevio(historial);
+    if (
+      interpretacion.intencion === "consultar" &&
+      !huboCambios
+    ) {
+      const contenido = await respuestaConsulta(mensaje, sesion);
+      return enviar(contenido);
+    }
 
-    const resultados = [];
-    let reservaGuardada = false;
+    if (
+      interpretacion.intencion === "confirmar" &&
+      estabaEsperandoConfirmacion &&
+      !huboCambios
+    ) {
+      const faltantes = camposFaltantes(sesion.datos);
 
-    for (const toolCall of toolCalls) {
-      const nombreFuncion = toolCall.function?.name;
-
-      if (nombreFuncion !== "confirmar_y_guardar_reserva") {
-        resultados.push({
-          success: false,
-          code: "HERRAMIENTA_NO_PERMITIDA",
-          message: "La operación solicitada no está disponible.",
-        });
-        continue;
+      if (faltantes.length) {
+        sesion.estado = "recopilando";
+        sesion.resumenPendiente = false;
+        return enviar(preguntas[faltantes[0]]);
       }
 
-      if (!confirmado) {
-        resultados.push({
-          success: false,
-          code: "CONFIRMACION_REQUERIDA",
-          message:
-            "Debe mostrar un resumen de la reserva y solicitar confirmación explícita antes de guardarla.",
-        });
-        continue;
+      const error = validarDatos(sesion.datos);
+
+      if (error) {
+        sesion.estado = "recopilando";
+        sesion.resumenPendiente = false;
+        return enviar(error);
       }
 
-      if (reservaGuardada) {
-        resultados.push({
-          success: false,
-          code: "RESERVA_YA_PROCESADA",
-          message: "Esta solicitud ya fue procesada.",
-        });
-        continue;
-      }
+      sesion.estado = "registrando";
 
-      let args;
+      let resultado;
 
       try {
-        args = JSON.parse(toolCall.function.arguments || "{}");
-      } catch {
-        resultados.push({
-          success: false,
-          code: "ARGUMENTOS_INVALIDOS",
-          message: "Los datos recibidos no tienen un formato válido.",
-        });
-        continue;
+        resultado = await GuardarReserva(
+          prepararDatosGuardar(sesion.datos)
+        );
+      } catch (errorGuardar) {
+        console.error("Error GuardarReserva:", errorGuardar);
+
+        sesion.estado = "revision_manual";
+        sesion.resumenPendiente = false;
+
+        return enviar(
+          "Se produjo un inconveniente al registrar su solicitud. No podemos asegurar si quedó guardada. Por favor, comuníquese con el restaurante antes de intentarlo nuevamente para evitar duplicados."
+        );
       }
 
-      const datosReserva = normalizarDatosReserva(args);
-      const errorValidacion = validarReserva(datosReserva);
+      if (!resultado?.success || !resultado?.insertId) {
+        sesion.estado = "revision_manual";
+        sesion.resumenPendiente = false;
 
-      if (errorValidacion) {
-        resultados.push({
-          success: false,
-          code: "VALIDACION_FALLIDA",
-          message: errorValidacion,
-        });
-        continue;
+        return enviar(
+          "No hemos podido confirmar el registro de su solicitud. Nuestro equipo deberá revisar la situación antes de volver a intentarlo."
+        );
       }
 
-      try {
-        const resultado = await GuardarReserva(datosReserva);
+      sesion.estado = "registrada";
+      sesion.reservaId = resultado.insertId;
+      sesion.resumenPendiente = false;
 
-        if (!resultado?.success || !resultado.insertId) {
-          resultados.push({
-            success: false,
-            code: "ERROR_REGISTRO",
-            message:
-              resultado?.message ||
-              "No fue posible registrar la solicitud.",
-          });
-          continue;
-        }
+      let contenido =
+        `Muchas gracias, ${sesion.datos.nombre_cliente}. ` +
+        `Su solicitud de reserva ha sido registrada con el número ${resultado.insertId}. ` +
+        "Nuestro equipo se comunicará con usted para confirmar la disponibilidad de su mesa.";
 
-        reservaGuardada = true;
-
-        resultados.push({
-          success: true,
-          reservaId: resultado.insertId,
-          estado_reserva: "pendiente_confirmacion",
-          estado_pago: datosReserva.monto
-            ? "pendiente_verificacion"
-            : "sin_adelanto",
-          linkFormulario: resultado.linkFormulario || null,
-          message:
-            "Solicitud registrada. El restaurante se comunicará con el comensal para confirmar la reserva.",
-        });
-      } catch (error) {
-        console.error("Error guardando reserva:", error.message);
-
-        resultados.push({
-          success: false,
-          code: "ERROR_PERSISTENCIA",
-          message:
-            "No fue posible completar el registro. El restaurante debe revisar la solicitud.",
-        });
+      if (sesion.datos.monto > 0) {
+        contenido +=
+          " Hemos recibido la referencia de su adelanto, que permanece pendiente de verificación.";
       }
+
+      if (resultado.linkFormulario) {
+        contenido +=
+          ` Puede completar la información adicional aquí: ` +
+          `[Formulario de reserva](${resultado.linkFormulario}).`;
+      }
+
+      return enviar(contenido);
     }
 
-    const mensajesHerramientas = toolCalls.map((call, index) => ({
-      role: "tool",
-      tool_call_id: call.id,
-      content: JSON.stringify(
-        resultados[index] || {
-          success: false,
-          message: "Operación no procesada.",
-        }
-      ),
-    }));
+    const faltantes = camposFaltantes(sesion.datos);
+    const errorHorario = validarHorario(sesion.datos);
 
-    const secondResponse = await openai.chat.completions.create({
-      model: MODEL,
-      messages: [
-        ...conversationHistory,
-        responseMessage,
-        ...mensajesHerramientas,
-      ],
-      temperature: 0.3,
-      max_tokens: 650,
-    });
+    if (errorHorario) {
+      sesion.resumenPendiente = false;
+      sesion.estado = "recopilando";
 
-    const mensajeFinal =
-      secondResponse.choices[0]?.message?.content;
+      return enviar(errorHorario);
+    }
 
-    if (!mensajeFinal) {
-      return respuesta(
-        res,
-        "La solicitud fue procesada, pero no pude generar una respuesta. Comuníquese con el restaurante para verificar su estado.",
-        502
+    if (faltantes.length > 0) {
+      sesion.resumenPendiente = false;
+      sesion.estado = "recopilando";
+
+      return enviar(
+        `Muchas gracias. ${preguntas[faltantes[0]]}`
       );
     }
 
-    return respuesta(res, mensajeFinal);
+    const errorValidacion = validarDatos(sesion.datos);
+
+    if (errorValidacion) {
+      sesion.estado = "recopilando";
+      return enviar(errorValidacion);
+    }
+
+    if (
+      sesion.resumenPendiente &&
+      sesion.versionConfirmada === sesion.version
+    ) {
+      return enviar(
+        "Ya tengo todos los datos de su solicitud. ¿Desea confirmar el registro con la información del resumen anterior?"
+      );
+    }
+
+    sesion.estado = "esperando_confirmacion";
+    sesion.resumenPendiente = true;
+    sesion.versionConfirmada = sesion.version;
+
+    return enviar(crearResumen(sesion.datos));
   } catch (error) {
-    console.error("Error OpenAI:", {
+    console.error("Error chatController:", {
+      message: error.message,
       status: error.status,
       code: error.code,
-      message: error.message,
     });
 
-    return respuesta(
-      res,
-      "Disculpe, nuestro asistente presenta un inconveniente temporal. Inténtelo nuevamente en unos momentos.",
-      503
-    );
+    return res.status(503).json({
+      error: "El asistente no está disponible temporalmente.",
+      result: {
+        role: "assistant",
+        content:
+          "Disculpe, estamos experimentando un inconveniente técnico. Por favor, inténtelo nuevamente.",
+      },
+      estado: sesion.estado,
+    });
+  } finally {
+    sesion.ocupado = false;
+    sesion.actualizadoEn = Date.now();
   }
 };

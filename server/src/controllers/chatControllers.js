@@ -902,7 +902,7 @@ export const chatController = async (req, res) => {
       if (habiaResumenVigente && !actualizado && !cambioPago) {
         sesion.estado = "esperando_confirmacion";
         sesion.resumenPendiente = true;
-        sesion.consultaPendiente = true;
+        sesion.consultaPendiente = false;
 
         return enviar(
           `${respuesta}\n\nCuando haya resuelto sus dudas, podremos continuar con la confirmación de su solicitud.`

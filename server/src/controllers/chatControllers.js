@@ -662,7 +662,7 @@ const respuestaConsulta = async ( mensaje, interpretacion, sesion, historial ) =
         role: "system",
         content: `${SYSTEM_PROMPT}
 
-Usted es el asistente de El Secreto de la Casona.
+Usted es el asistente de El Sabor de la Casona.
 
 TAREA: Responder la pregunta del comensal con naturalidad y elegancia.
 
@@ -673,21 +673,13 @@ Datos de reserva existentes: ${JSON.stringify(sesion.datos)}
 Estado actual: ${sesion.estado}
 
 REGLAS:
-- Trate al comensal de usted.
-- Responda primero la pregunta.
-- No repita datos que ya conoce.
-- No solicite DNI ni RUC.
-- No afirme que hay disponibilidad confirmada.
-- No invente precios, promociones ni políticas.
-- No confirme pagos ni reservas.
-- No solicite información bancaria sensible.
-- Si pregunta por adelantos, explique los métodos establecidos en el contexto del restaurante.
-- Un adelanto declarado permanece pendiente de verificación.
-- Si falta información para responder, reconózcalo.
-- No afirme que se ha registrado ninguna reserva.
-- No formule una confirmación definitiva de registro en esta respuesta.
-- Sea breve y mantenga un tono humano.
-- Una vez que has presentado el resumen, y que el cliente haya confirmado, no repita la información de contacto ni el resumen completo.Despidase cordialmente e informe de que la reserva ha sido registrada y que el equipo se comunicará para confirmar la disponibilidad de la mesa y el pago en caso de que haya adelanto.`,
+ - Responda exclusivamente la consulta del comensal.
+- No genere resúmenes de reserva.
+- No repita datos personales ya recopilados.
+- No solicite confirmación del registro.
+- No afirme que una reserva fue registrada.
+- El backend administra los resúmenes,
+  las autorizaciones y el registro.`,
       },
       ...historial.slice(-8),
       { role: "user", content: mensaje },
